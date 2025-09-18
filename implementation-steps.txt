@@ -1,0 +1,117 @@
+LDAP PROJECT
+
+
+
+STEP 1 - PREREQUISITES
+- Ubuntu Azure VM
+
+- A Static Public IP (Highly Recommended): 
+  This prevents the IP from changing on restart, which is crucial for certificate consistency. 
+
+- FQDN for Certificates: 
+  Since I don't have a domain, I use the VM's Public IP address as the Common Name in the certificate. 
+  This is not ideal for a real production setup (where you'd use a real DNS name) but is perfect for practice.
+
+-  Open Ports in Azure NSG: Ensure VM's Network Security Group allows:
+   Port 389 (LDAP): For initial testing and unencrypted communication (will be disabled later).
+   Port 636 (LDAPS): For secure LDAP over SSL/TLS.
+
+STEP 2 - INSTALLING AND CONFIGURING LDAP
+- Install the OpenLDAP server (slapd) and the client utilities.
+  sudo apt update
+  sudo apt install slapd ldap-utils
+
+- During the installation, you will be prompted for an administrator password. 
+  Choose a very strong password and remember it. This is for the LDAP root user
+
+- Reconfigure slapd for a Custom Base DN:
+  It's best to set up your Domain Name (DN) correctly from the start. Let's assume our organization is "mycompany".
+  sudo dpkg-reconfigure slapd
+
+  Answer the prompts as follows:
+
+    Omit OpenLDAP server configuration? No
+    DNS domain name: mycompany.local (This forms the base of your LDAP tree, e.g., dc=mycompany,dc=local)
+    Organization name: mycompany
+    Administrator password: Enter the strong password you set during install.
+    Database backend: MDB
+    Remove the database when slapd is purged? No
+    Move old database? Yes
+    Allow LDAPv2 protocol? No
+
+- Verify the Installation:
+  Check if the server is running and listening on ports 389 and 636.
+  sudo systemctl status slapd
+  sudo netstat -tnlp | grep slapd # You should see it listening on 0.0.0.0:389 and :::389
+
+- Test a Simple LDAP Query:
+  Query your own root DSE (Directory System Entry) to confirm it's working.
+  ldapsearch -x -LLL -H ldap:/// -b "" -s base "(objectclass=*)" namingContexts # You should see output like: namingContexts: dc=mycompany,dc=local
+
+STEP 3 -  SECURING LDAP WITH TLS/SSL (LDAPS)
+- Use openssl command create a self-signed certificate, but we'll tell the LDAP server to use it.
+
+- Generate a Self-Signed Certificate:
+  CRUCIAl: When prompted for Common Name, you MUST enter VM's Public IP Address. The certificate must match the address clients use to connect
+  sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout /etc/ssl/private/ldaps_mycompany.key \
+  -out /etc/ssl/private/ldaps_mycompany.crt
+
+- Set secure permissions on the private key:
+  sudo chmod 600 /etc/ssl/private/ldaps_mycompany.key
+
+- Configure OpenLDAP to Use the Certificate
+  sudo vim /etc/ldap/ldap.conf
+  ADD:
+  # LDAP Client Configuration
+  TLS_REQCERT allow
+  BASE dc=mycompany,dc=local
+  URI ldap://localhost ldaps://localhost
+
+  # Point to the CA certificate (since it's self-signed, it's its own CA)
+  TLS_CACERT /etc/ssl/private/ldaps_mycompany.crt
+
+- Modify the SLAPD Service Configuration:
+  sudo vim /etc/default/slapd
+  
+  Find the line for SLAPD_SERVICES and modify it to disable plain LDAP and enable LDAPS. This is a key hardening step.
+  # Before (approx)
+  # SLAPD_SERVICES="ldap:/// ldapi:///"
+
+  # After - REMOVE ldap:/// and add ldaps:///
+  SLAPD_SERVICES="ldaps:/// ldapi:///"
+
+- Add TLS Configuration to the LDAP Directory Itself:
+  We need to create an LDIF file to tell the running LDAP server about our certificate.
+  sudo nano ~/tls_config.ldif
+  PASTE:
+  dn: cn=config
+  changetype: modify
+  add: olcTLSCACertificateFile
+  olcTLSCACertificateFile: /etc/ssl/private/ldaps_mycompany.crt
+  -
+  add: olcTLSCertificateFile
+  olcTLSCertificateFile: /etc/ssl/private/ldaps_mycompany.crt
+  -
+  add: olcTLSCertificateKeyFile
+  olcTLSCertificateKeyFile: /etc/ssl/private/ldaps_mycompany.key
+  -
+  add: olcTLSVerifyClient
+  olcTLSVerifyClient: never
+
+- Apply this configuration using ldapmodify
+  sudo ldapmodify -Y EXTERNAL -H ldapi:/// -f ~/tls_config.ldif
+
+- Restart and Test the Secure Service:
+  sudo systemctl restart slapd
+  sudo netstat -tnlp | grep slapd
+  # Now it should ONLY be listening on port 636 (ldaps) and the local ldapi socket
+
+
+
+
+
+
+
+
+
