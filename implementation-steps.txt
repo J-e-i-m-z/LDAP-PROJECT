@@ -25,14 +25,14 @@ STEP 2 - INSTALLING AND CONFIGURING LDAP
   Choose a very strong password and remember it. This is for the LDAP root user
 
 - Reconfigure slapd for a Custom Base DN:
-  It's best to set up your Domain Name (DN) correctly from the start. Let's assume our organization is "mycompany".
+  It's best to set up your Domain Name (DN) correctly from the start. Let's assume our organization is "example".
   sudo dpkg-reconfigure slapd
 
   Answer the prompts as follows:
 
     Omit OpenLDAP server configuration? No
-    DNS domain name: mycompany.local (This forms the base of your LDAP tree, e.g., dc=mycompany,dc=local)
-    Organization name: mycompany
+    DNS domain name: example.com (This forms the base of your LDAP tree, e.g., dc=example,dc=com)
+    Organization name: example
     Administrator password: Enter the strong password you set during install.
     Database backend: MDB
     Remove the database when slapd is purged? No
@@ -47,65 +47,151 @@ STEP 2 - INSTALLING AND CONFIGURING LDAP
 - Test a Simple LDAP Query:
   Query your own root DSE (Directory System Entry) to confirm it's working.
   ldapsearch -x -LLL -H ldap:/// -b "" -s base "(objectclass=*)" namingContexts # You should see output like: namingContexts: dc=mycompany,dc=local
+  sudo ldapsearch -Q -LLL -Y EXTERNAL -H ldapi:/// -b cn=config dn  # Confirm LDAP server config is accessible.
+  ldapsearch -x -LLL -H ldap:/// -b dc=example,dc=com dn # Confirm your directory tree is alive (you’ll see your base DN).
 
-STEP 3 -  SECURING LDAP WITH TLS/SSL (LDAPS)
-- Use openssl command create a self-signed certificate, but we'll tell the LDAP server to use it.
+STEP 3 - LDAP VERIFICATION STEPS
+- Anonymous Bind
+  ldapwhoami -x
+  Output: anonymous
+  - Confirms the server accepts anonymous connections.
 
-- Generate a Self-Signed Certificate:
-  CRUCIAl: When prompted for Common Name, you MUST enter VM's Public IP Address. The certificate must match the address clients use to connect
-  sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout /etc/ssl/private/ldaps_mycompany.key \
-  -out /etc/ssl/private/ldaps_mycompany.crt
+- Simple Bind as Admin
+  ldapwhoami -x -D cn=admin,dc=example,dc=com -W
+  Output: dn:cn=admin,dc=example,dc=com
+  - Confirms admin credentials work (password verified).
 
-- Set secure permissions on the private key:
-  sudo chmod 600 /etc/ssl/private/ldaps_mycompany.key
+- SASL/EXTERNAL Authentication (as current user)
+  ldapwhoami -Y EXTERNAL -H ldapi:/// -Q
+  Output (example for user james): dn:gidNumber=1000+uidNumber=1000,cn=peercred,cn=external,cn=auth
+  - Confirms system user (james) can authenticate via UNIX socket.
 
-- Configure OpenLDAP to Use the Certificate
-  sudo vim /etc/ldap/ldap.conf
-  ADD:
-  # LDAP Client Configuration
-  TLS_REQCERT allow
-  BASE dc=mycompany,dc=local
-  URI ldap://localhost ldaps://localhost
+- SASL/EXTERNAL Authentication (as root)
+  sudo ldapwhoami -Y EXTERNAL -H ldapi:/// -Q
+  Output: dn:gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth
+  - Confirms root has full access to cn=config, needed for server management.
 
-  # Point to the CA certificate (since it's self-signed, it's its own CA)
-  TLS_CACERT /etc/ssl/private/ldaps_mycompany.crt
 
-- Modify the SLAPD Service Configuration:
-  sudo vim /etc/default/slapd
+STEP 4 -  SECURING LDAP WITH TLS/SSL (LDAPS)
+  1. INSTALL REQUIRED PACKAGES
+- Install the gnutls-bin and ssl-cert packages:
+  sudo apt install gnutls-bin ssl-cert
   
-  Find the line for SLAPD_SERVICES and modify it to disable plain LDAP and enable LDAPS. This is a key hardening step.
-  # Before (approx)
-  # SLAPD_SERVICES="ldap:/// ldapi:///"
+  2. CREATE CERTIFICATE AUTHORITY (CA)
+- Create a private key for the Certificate Authority
+  sudo certtool --generate-privkey --bits 4096 --outfile /etc/ssl/private/mycakey.pem
 
-  # After - REMOVE ldap:/// and add ldaps:///
-  SLAPD_SERVICES="ldaps:/// ldapi:///"
+- Create CA info template
+  sudo vim /etc/ssl/ca.info
 
-- Add TLS Configuration to the LDAP Directory Itself:
-  We need to create an LDIF file to tell the running LDAP server about our certificate.
-  sudo nano ~/tls_config.ldif
   PASTE:
+  cn = Example Company
+  ca
+  cert_signing_key
+  expiration_days = 3650
+
+- Generate self-signed CA certificate
+  sudo certtool --generate-self-signed \
+  --load-privkey /etc/ssl/private/mycakey.pem \
+  --template /etc/ssl/ca.info \
+  --outfile /usr/local/share/ca-certificates/mycacert.crt
+
+- Update trusted CA certificates
+  sudo update-ca-certificates
+
+  3. CREATE SERVER CERTIFICATE
+- Create server private key
+  sudo certtool --generate-privkey \
+  --bits 2048 \
+  --outfile /etc/ldap/ldap_server_key.pem
+
+- Create server info file
+  sudo vim /etc/ssl/ldap.info
+
+- Generate server certificate
+  sudo certtool --generate-certificate \
+  --load-privkey /etc/ldap/ldap_server_key.pem \
+  --load-ca-certificate /etc/ssl/certs/mycacert.pem \
+  --load-ca-privkey /etc/ssl/private/mycakey.pem \
+  --template /etc/ssl/ldap.info \
+  --outfile /etc/ldap/ldap_server_cert.pem
+
+- Set proper permissions
+  sudo chgrp openldap /etc/ldap/ldap_server_key.pem
+  sudo chmod 0640 /etc/ldap/ldap_server_key.pem
+
+  4. CONFIGURE LDAP TO USE TLS
+- Create the LDIF configuration file
+  sudo vim ~/certinfo.ldif
+
   dn: cn=config
-  changetype: modify
   add: olcTLSCACertificateFile
-  olcTLSCACertificateFile: /etc/ssl/private/ldaps_mycompany.crt
+  olcTLSCACertificateFile: /etc/ssl/certs/mycacert.pem
   -
   add: olcTLSCertificateFile
-  olcTLSCertificateFile: /etc/ssl/private/ldaps_mycompany.crt
+  olcTLSCertificateFile: /etc/ldap/ldap_server_cert.pem
   -
   add: olcTLSCertificateKeyFile
-  olcTLSCertificateKeyFile: /etc/ssl/private/ldaps_mycompany.key
-  -
-  add: olcTLSVerifyClient
-  olcTLSVerifyClient: never
+  olcTLSCertificateKeyFile: /etc/ldap/ldap_server_key.pem
 
-- Apply this configuration using ldapmodify
-  sudo ldapmodify -Y EXTERNAL -H ldapi:/// -f ~/tls_config.ldif
+- Apply the TLS configuration
+  sudo ldapmodify -Y EXTERNAL -H ldapi:/// -f ~/certinfo.ldif
 
-- Restart and Test the Secure Service:
+  5. ENABLE LDAPS AND RESTART SERVICE 
+- Edit slapd configuration to enable LDAPS
+  sudo vim /etc/default/slapd
+
+  Find the SLAPD_SERVICES line and change it to:
+  SLAPD_SERVICES="ldap:/// ldapi:/// ldaps:///"
+
+- Restart the service
   sudo systemctl restart slapd
-  sudo netstat -tnlp | grep slapd
-  # Now it should ONLY be listening on port 636 (ldaps) and the local ldapi socket
+  sudo systemctl status slapd
+
+- Verify it's listening on LDAPS port (636)
+  sudo netstat -tnlp | grep :636
+
+   6. FORCE CLIENT TO TRUST LDAP SERVER'S TLS CA EXPLICITLY 
+- We generated our own CA (mycacert.pem) and signed the server cert with it.
+- By default, ldapwhoami / ldapsearch doesn't know about that CA, so the TLS handshake will fail.
+
+  sudo vim /etc/ldap/ldap.conf
+
+- ADD THIS LINE:
+  TLS_CACERT /etc/ssl/certs/mycacert.pem
+
+- That way, even if ldap.conf isn’t being read, it knows which CA to trust.
+   
+- TEST: 
+  ldapwhoami -x -H ldaps://4.221.168.19 -D "cn=admin,dc=example,dc=com" -W
+
+  7. TEST THE TLS CONFIGURATION
+- Test from your local machine (replace with your VM IP)
+  ldapwhoami -x -H ldaps://4.221.168.19
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

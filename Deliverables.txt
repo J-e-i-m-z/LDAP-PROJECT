@@ -1,0 +1,9 @@
+Installing and configuring an OpenLDAP server on Azure VM.
+
+Securing LDAP with TLS/SSL certificates. ( I dont have domains )
+
+Creating and managing LDAP users and groups.
+
+Configuring VM so that system logins can be authenticated against the LDAP directory.
+
+Best practices for hardening the LDAP server for production-like environments (even though this is for practice)
