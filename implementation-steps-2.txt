@@ -1,0 +1,99 @@
+CREATING AND MANAGING LDAP USERS AND GROUPS
+
+1. CREATE AN OU FOR PEOPLE AND GROUPS
+- Create an LDIF file.
+  sudo vim ~/create_ous.ldif
+  
+  PASTE:
+  dn: ou=People,dc=example,dc=com
+  objectClass: organizationalUnit
+  ou: People
+
+  dn: ou=Groups,dc=example,dc=com
+  objectClass: organizationalUnit
+  ou: Groups
+
+- Add it to the directory:
+  ldapadd -x -D "cn=admin,dc=example,dc=com" -W -H ldaps://4.221.168.19 -f ~/create_ous.ldif # You will be prompted for the LDAP admin password you set earlier.
+
+2. CREATE AN LDAP GROUP
+   sudo vim ~/create_group.ldif
+
+   PASTE: 
+   dn: cn=devops-team,ou=Groups,dc=example,dc=com
+   objectClass: top
+   objectClass: posixGroup
+   cn: devops-team
+   gidNumber: 5000
+   memberUid: james.nyamburi  
+
+3. CREATE AN LDAP USER
+- Create an ldif file.
+  sudo vim ~/create_user.ldif
+
+  PASTE: 
+  dn: uid=james.nyamburi,ou=People,dc=example,dc=com
+  objectClass: top
+  objectClass: account
+  objectClass: posixAccount
+  objectClass: shadowAccount
+  cn: James Nyamburi
+  uid: james.nyamburi
+  uidNumber: 10000
+  gidNumber: 5000
+  homeDirectory: /home/james.nyamburi
+  loginShell: /bin/bash
+  gecos: James Nyamburi
+  userPassword: {SSHA}...your_hashed_password_here...
+
+- Generate a password hash. The slappasswd utility does this:
+  slappasswd
+- Enter a password for the new user. It will output a hash like {SSHA}.... Copy this entire hash.
+- Paste in the create_user.ldif file 
+
+- Add the user:
+  ldapadd -x -D "cn=admin,dc=example,dc=com" -W -H ldaps://4.221.168.19 -f ~/create_user.ldif
+
+- Verify the User was Created
+  ldapsearch -x -LLL -H ldaps://4.221.168.19 -b "ou=People,dc=example,dc=com" "(uid=james.nyamburi)"
+
+4. CONFIGURING THE VM FOR LDAP AUTHENTICATION (SYSTEM LOGINS) 
+- We'll use libnss-ldap and libpam-ldap to allow the system to use LDAP for authentication.
+
+  Install the necessary packages:
+    sudo apt install libnss-ldap libpam-ldap ldap-utils
+  
+  You will be prompted for configuration details. Answer as follows:
+
+    LDAP server Uniform Resource Identifier: ldaps://4.221.168.19 
+    Distinguished name of the search base: dc=example,dc=com
+    LDAP version to use: 3
+    Make local root Database admin: Yes
+    Does the LDAP database require login? No
+    LDAP account for root: cn=admin,dc=example,dc=example
+    LDAP root account password: Enter your LDAP admin password.
+
+5. CONFIGURE NSS (Name Service Switch):
+   sudo vim /etc/nsswitch.conf
+
+- Find the passwd, group, and shadow lines and add ldap to them
+
+6. CONFIGURE PAM (Pluggable Authentication Modules):
+   sudo pam-auth-update
+   
+   From the list, ensure that:
+   - Unix authentication is checked.
+   - LDAP Authentication is checked.
+   Enter 1 2 4 
+
+7. TEST THE CONFIGURATION:
+- Test if the system can see the LDAP user
+  getent passwd james.nyamburi
+
+- Try to switch to the user (this tests authentication)
+  su - james.nyamburi
+
+- You will be prompted for the password you set for james.nyamburi with "slappasswd".
+- If successful, your prompt will change. Type "exit" to return to your admin user
+
+
